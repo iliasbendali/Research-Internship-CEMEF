@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Dict, Tuple
 
 import numpy as np
 
@@ -73,14 +73,99 @@ class ActionDetector:
 
 @dataclass
 class TemporalPostProcessor:
-    threshold: float = 0.5
-    min_separation_seconds: float = 20.0   # éviter les pics quasi identiques, peut-être que j'utiliserai 
-                                           # un dico pour la suite
-    top_k: Optional[int] = None            # None = pas de limite par label
+    """
+    Convertit des scores frame-level (T,17) en événements discrets.
 
-    def _min_sep_frames(self, half: HalfEmbeddings) -> int:
+    Stratégie:
+    1) Pour chaque label: candidats = indices où prob >= threshold
+    2) Optionnel: ne garder que des maxima locaux (recommandé)
+    3) NMS temporel greedy (fenêtre symétrique): on garde le meilleur pic,
+       puis on supprime tous les autres pics dans [t-min_sep, t+min_sep].
+    4) Optionnel: top_k par label
+
+    Notes:
+    - threshold et min_separation_seconds peuvent être globaux ou overridés par label via per_label.
+    """
+
+    threshold: float = 0.5
+    min_separation_seconds: float = 20.0
+    top_k: Optional[int] = None
+
+    # (optionnel) override par label: {"Goal": {"threshold":0.4, "min_sep":30}, ...}
+    per_label: Optional[Dict[str, Dict[str, float]]] = None
+
+    # si True: ne garde que les maxima locaux parmi les points au-dessus du seuil
+    local_max_only: bool = True
+
+    def _step_seconds(self, half: HalfEmbeddings) -> float:
         step = float(getattr(half, "step_seconds", 0.5) or 0.5)
-        return max(1, int(round(self.min_separation_seconds / step)))
+        return step if step > 0 else 0.5
+
+    def _min_sep_frames(self, half: HalfEmbeddings, min_sep_seconds: float) -> int:
+        step = self._step_seconds(half)
+        return max(1, int(round(float(min_sep_seconds) / step)))
+
+    def _get_params_for_label(self, label: str) -> Tuple[float, float]:
+        thr = float(self.threshold)
+        min_sep = float(self.min_separation_seconds)
+        if self.per_label and label in self.per_label:
+            cfg = self.per_label[label]
+            if "threshold" in cfg:
+                thr = float(cfg["threshold"])
+            if "min_sep" in cfg:
+                min_sep = float(cfg["min_sep"])
+        return thr, min_sep
+
+    @staticmethod
+    def _filter_local_maxima(indices: np.ndarray, probs: np.ndarray) -> np.ndarray:
+        """
+        Garde seulement les indices qui sont des maxima locaux (strict ou plateau géré).
+        - On accepte un plateau si l'indice est au sommet du plateau (proba == max local).
+        """
+        if indices.size == 0:
+            return indices
+
+        # Pour décider "max local", on regarde voisins immédiats dans la série complète.
+        # On gère les bords.
+        kept = []
+        T = probs.shape[0]
+
+        for t in indices.tolist():
+            p = probs[t]
+            left = probs[t - 1] if t - 1 >= 0 else -np.inf
+            right = probs[t + 1] if t + 1 < T else -np.inf
+
+            # cas simple: strictement >= voisins
+            if p >= left and p >= right:
+                kept.append(t)
+
+        return np.array(kept, dtype=np.int64)
+
+    def _nms_greedy(self, candidates: np.ndarray, probs: np.ndarray, min_sep_frames: int) -> np.ndarray:
+        """
+        NMS greedy symétrique: garde les meilleurs scores, supprime dans +/- min_sep_frames.
+        """
+        if candidates.size == 0:
+            return candidates
+
+        # Trier par score décroissant
+        order = np.argsort(probs[candidates])[::-1]
+        cand_sorted = candidates[order]
+
+        selected: List[int] = []
+        suppressed = np.zeros(probs.shape[0], dtype=bool)  # suppression par frame
+
+        for t in cand_sorted.tolist():
+            if suppressed[t]:
+                continue
+            selected.append(t)
+            lo = max(0, t - min_sep_frames)
+            hi = min(probs.shape[0] - 1, t + min_sep_frames)
+            suppressed[lo : hi + 1] = True
+
+        selected = np.array(selected, dtype=np.int64)
+        selected.sort()  # tri chronologique
+        return selected
 
     def extract_events_for_label(
         self,
@@ -89,68 +174,46 @@ class TemporalPostProcessor:
         label: EventLabel,
         source: str = "transformer",
     ) -> List[ActionEvent]:
-        """
-        ici je transforme une série de probas (T,) en événements (pics) pour un label.
-        comment ?
-        - on garde les indices au-dessus du threshold (peut-être que j'implémenterai un dico 
-                                                threshold avec une valeur par classe, à voir)
-        - on groupe les indices proches (<= min_sep_frames)
-        - par groupe, on garde le max (argmax local)
-        - optionnel: top_k (par label)
-        """
         T = int(probs_1d.shape[0])
         if T == 0:
             return []
 
-        thr = float(self.threshold)
-        candidates = np.where(probs_1d >= thr)[0]
+        thr, min_sep_seconds = self._get_params_for_label(str(label))
+        candidates = np.where(probs_1d >= thr)[0].astype(np.int64)
         if candidates.size == 0:
             return []
 
-        min_sep = self._min_sep_frames(half)
+        # Option: ne garder que maxima locaux
+        if self.local_max_only:
+            candidates = self._filter_local_maxima(candidates, probs_1d)
+            if candidates.size == 0:
+                return []
 
-        # Grouper en "blocs" d'indices proches
-        peaks: List[int] = []
-        start = int(candidates[0])
-        prev = start
+        # NMS greedy
+        min_sep_frames = self._min_sep_frames(half, min_sep_seconds)
+        peaks = self._nms_greedy(candidates, probs_1d, min_sep_frames)
 
-        for idx in candidates[1:]:
-            idx = int(idx)
-            if idx - prev <= min_sep:
-                prev = idx
-            else:
-                # bloc [start..prev] -> peak = argmax
-                seg = probs_1d[start : prev + 1]
-                peak = start + int(np.argmax(seg))
-                peaks.append(peak)
-                start = idx
-                prev = idx
+        # top_k par label (après NMS)
+        if self.top_k is not None:
+            k = int(self.top_k)
+            # ici peaks est trié par temps; pour top_k on trie par confiance puis on reprend le temps
+            if peaks.size > 0:
+                order = np.argsort(probs_1d[peaks])[::-1]
+                peaks = peaks[order[:k]]
+                peaks.sort()
 
-        # dernier bloc
-        seg = probs_1d[start : prev + 1]
-        peak = start + int(np.argmax(seg))
-        peaks.append(peak)
-
-        # Construire ActionEvent
         events = [
             ActionEvent(
                 match_id=half.match_id,
                 half=half.half,
-                time_sec=half.index_to_time_sec(t),
+                time_sec=half.index_to_time_sec(int(t)),
                 label=label,
-                confidence=float(probs_1d[t]),
+                confidence=float(probs_1d[int(t)]),
                 source=source,
                 extra={"t_idx": int(t)},
             )
-            for t in peaks
+            for t in peaks.tolist()
         ]
-
-        # top_k par label (si demandé)
-        if self.top_k is not None:
-            k = int(self.top_k)
-            events.sort(key=lambda e: e.confidence, reverse=True)
-            events = events[:k]
-            events.sort(key=lambda e: e.time_sec)
 
         return events
 
@@ -161,13 +224,9 @@ class TemporalPostProcessor:
         labels: Optional[Sequence[EventLabel]] = None,
         source: str = "transformer",
     ) -> List[ActionEvent]:
-        """
-        Multi-label: extrait les events pour plusieurs labels et fusionne.
-        """
         if scores.ndim != 2 or scores.shape[1] != 17:
             raise ValueError(f"scores doit être (T,17). Reçu: {scores.shape}")
 
-        # labels à traiter
         if labels is None:
             labels = list(LABEL_TO_IDX.keys())  # type: ignore[assignment]
 
@@ -187,6 +246,40 @@ class TemporalPostProcessor:
                 )
             )
 
-        # tri global
         events.sort(key=lambda e: e.time_sec)
         return events
+    
+
+    
+
+    
+    def build_targets_for_half(T, annotations, step_seconds, label_to_idx, sigma_by_label, radius_sigmas=4.0):
+        Y = np.zeros((T, 17), dtype=np.float32)
+
+        for ann in annotations:
+            label = ann["label"]
+            if label not in label_to_idx:
+                continue
+
+            time_sec = ann["position"] / 1000.0   # si position est en ms
+            t0 = int(round(time_sec / step_seconds))
+            if t0 < 0 or t0 >= T:
+                continue
+
+            j = label_to_idx[label]
+            sigma_sec = sigma_by_label.get(label, 3.0)   # exemple fallback
+            sigma_frames = max(1e-6, sigma_sec / step_seconds)
+
+            radius = int(round(radius_sigmas * sigma_frames))
+            t_start = max(0, t0 - radius)
+            t_end   = min(T - 1, t0 + radius)
+
+            for t in range(t_start, t_end + 1):
+                z = (t - t0) / sigma_frames
+                g = np.exp(-0.5 * z * z)
+                if g > Y[t, j]:
+                    Y[t, j] = g
+
+        return Y
+
+

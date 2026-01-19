@@ -164,6 +164,7 @@ class Intent:
     params: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        
         """
         Validation minimale pour s'assurer que l'intent est exploitable.
         """
@@ -174,10 +175,11 @@ class Intent:
             has_teams = self.team1 is not None and self.team2 is not None
             has_date = self.match_date is not None
 
-            if not (has_teams or has_date):
+            need = (self.team1, self.team2, self.match_date, self.competition, self.season)
+            if any(x is None for x in need):
                 raise ValueError(
-                    "Intent invalide: fournir match_id OU (team1 + team2) OU match_date."
-                )
+                "Intent invalide: fournir match_id OU (team1 + team2 + match_date + competition + season)."
+            )
 
         # 2) Vérifier max_results
         if self.max_results <= 0:
