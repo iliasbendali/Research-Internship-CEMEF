@@ -37,6 +37,26 @@ LABELS = [
     "Shot off target",
 ]
 
+label_int = {
+    "Goal" : 0,
+    "Kick-off" : 1,
+    "Penalty" : 2,
+    "Yellow card" : 3,
+    "Red card" : 4,
+    "Yellow->red card" : 5,
+    "Foul" : 6,
+    "Substitution" : 7,
+    "Offside" : 8,
+    "Ball out of play" : 9,
+    "Throw-in" : 10,
+    "Clearance" : 11,
+    "Corner" : 12,
+    "Direct free-kick" : 13,
+    "Indirect free-kick" : 14,
+    "Shot on target" : 15,
+    "Shot off target" : 16,
+}
+
 LABEL_TO_IDX = {label: i for i, label in enumerate(LABELS)}
 
 # 17 classes SoccerNet version 3 (labels d'événements).

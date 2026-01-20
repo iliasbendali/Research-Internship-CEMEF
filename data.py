@@ -2,6 +2,7 @@ from pathlib import Path
 import numpy as np
 import re
 from domain import HalfEmbeddings, Half
+import json
 
 
 class SoccerNetDataClient:
@@ -9,6 +10,8 @@ class SoccerNetDataClient:
         1: "1_ResNET_TF2_PCA512.npy",
         2: "2_ResNET_TF2_PCA512.npy",
     }           # passage des fichiers embeddings aux mi-temps
+
+    LABEL_FILES = ["Labels-v3.json", "Labels-v3"]  # windows peut masquer .json
 
     def __init__(self, root_dir: str | Path):
         self.root_dir = Path(root_dir)
@@ -118,3 +121,21 @@ class SoccerNetDataClient:
             self.load_half(match_id, 2),
         ]
 
+    def load_labels(self, match_id: str) -> dict:
+        """
+        Charge le JSON de labels du match (Labels-v3).
+        """
+        match_dir = self.root_dir / match_id
+
+        label_path = None
+        for name in self.LABEL_FILES:
+            p = match_dir / name
+            if p.exists():
+                label_path = p
+                break
+
+        if label_path is None:
+            raise FileNotFoundError(f"Labels introuvables dans {match_dir} (attendu: {self.LABEL_FILES})")
+
+        with open(label_path, "r", encoding="utf-8") as f:
+            return json.load(f)

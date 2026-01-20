@@ -1,0 +1,70 @@
+# losses.py
+from __future__ import annotations
+import torch
+import torch.nn.functional as F
+
+
+@torch.no_grad()
+def compute_pos_weight_from_loader(
+    loader,
+    num_classes: int = 17,
+    max_pos_weight: float = 50.0,
+    device: str | torch.device = "cpu",
+    max_batches: int | None = None,
+) -> torch.Tensor:
+    pos_sum = torch.zeros(num_classes, dtype=torch.float64)
+    neg_sum = torch.zeros(num_classes, dtype=torch.float64)
+
+    for i, batch in enumerate(loader):
+        if max_batches is not None and i >= max_batches:
+            break
+
+        y = batch["y"]
+        mask = batch.get("mask", None)
+
+        y = y.to(torch.float64)
+        if mask is None:
+            m = torch.ones(y.shape[:2], dtype=torch.float64)
+        else:
+            m = mask.to(torch.float64)
+
+        m = m.unsqueeze(-1)
+        pos_sum += (y * m).sum(dim=(0, 1)).cpu()
+        neg_sum += ((1.0 - y) * m).sum(dim=(0, 1)).cpu()
+
+    eps = 1e-9
+    pos_weight = (neg_sum / (pos_sum + eps)).to(torch.float32)
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=float(max_pos_weight))
+    return pos_weight.to(device)
+
+
+
+def masked_bce_with_logits_loss(
+    logits: torch.Tensor,     # (B,L,C)
+    targets: torch.Tensor,    # (B,L,C) in [0,1]
+    mask: torch.Tensor | None = None,  # (B,L) in {0,1}
+    pos_weight: torch.Tensor | None = None,  # (C,)
+) -> torch.Tensor:
+    """
+    BCEWithLogitsLoss + mask padding.
+    Retourne un scalaire.
+    """
+    # BCE element-wise: (B,L,C)
+    loss_el = F.binary_cross_entropy_with_logits(
+        logits,
+        targets,
+        pos_weight=pos_weight,
+        reduction="none",
+    )
+
+    if mask is None:
+        return loss_el.mean()
+
+    # mask: (B,L,1)
+    m = mask.unsqueeze(-1).to(loss_el.dtype)
+    loss_el = loss_el * m
+
+    denom = m.sum() * logits.shape[-1]  # nb d'éléments valides
+    denom = torch.clamp(denom, min=1.0)
+
+    return loss_el.sum() / denom

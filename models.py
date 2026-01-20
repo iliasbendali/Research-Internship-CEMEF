@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Dict, Tuple
+from typing import List, Optional, Sequence, Dict, Tuple, Any
 
 import numpy as np
 
-from domain import HalfEmbeddings, ActionEvent, EventLabel, LABEL_TO_IDX
+from domain import HalfEmbeddings, ActionEvent, EventLabel, LABEL_TO_IDX, label_int
 
 import torch
 
@@ -248,38 +248,4 @@ class TemporalPostProcessor:
 
         events.sort(key=lambda e: e.time_sec)
         return events
-    
-
-    
-
-    
-    def build_targets_for_half(T, annotations, step_seconds, label_to_idx, sigma_by_label, radius_sigmas=4.0):
-        Y = np.zeros((T, 17), dtype=np.float32)
-
-        for ann in annotations:
-            label = ann["label"]
-            if label not in label_to_idx:
-                continue
-
-            time_sec = ann["position"] / 1000.0   # si position est en ms
-            t0 = int(round(time_sec / step_seconds))
-            if t0 < 0 or t0 >= T:
-                continue
-
-            j = label_to_idx[label]
-            sigma_sec = sigma_by_label.get(label, 3.0)   # exemple fallback
-            sigma_frames = max(1e-6, sigma_sec / step_seconds)
-
-            radius = int(round(radius_sigmas * sigma_frames))
-            t_start = max(0, t0 - radius)
-            t_end   = min(T - 1, t0 + radius)
-
-            for t in range(t_start, t_end + 1):
-                z = (t - t0) / sigma_frames
-                g = np.exp(-0.5 * z * z)
-                if g > Y[t, j]:
-                    Y[t, j] = g
-
-        return Y
-
 
