@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+from pathlib import Path
 
 from dataset import SoccerNetWindowDataset
 from models_patchtst import PatchTSTSpotter
@@ -11,8 +12,8 @@ from losses import (
 # ------------------
 # CONFIG
 # ------------------
-ROOT_DIR = "C:/Users/Ilias/Documents/cours_MINES/TR/projet/data/data"
-BATCH_SIZE = 2          
+ROOT_DIR = Path("/home/ibendali/soccernet_data/data/")
+BATCH_SIZE = 2       
 NUM_WORKERS = 0            # CPU loading
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("DEVICE:", DEVICE)
@@ -40,6 +41,10 @@ for competition_dir in ROOT_DIR.iterdir():
                 f"{competition_dir.name}/{season_dir.name}/{match_dir.name}"
             )
 
+train_match_ids = train_match_ids[:7]  # <-- limite pour tester
+"""
+train_match_ids = ["england_epl/2014-2015/2015-05-17 - 18-00 Manchester United 1 - 1 Arsenal"]
+"""
 # ------------------
 # DATASET + DATALOADER
 # ------------------
@@ -57,7 +62,7 @@ train_loader = DataLoader(
     batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=NUM_WORKERS,
-    pin_memory=True,
+    pin_memory = (DEVICE == "cuda" and NUM_WORKERS > 0),
 )
 
 # ------------------
@@ -85,6 +90,18 @@ pos_weight = compute_pos_weight_from_loader(
     device=DEVICE,
     max_batches=200,
 )
+# ---- sanity check label density ----
+
+with torch.no_grad():
+    batch = next(iter(train_loader))
+    y0 = batch["y"]          # (B,L,17)
+    mask0 = batch["mask"]    # (B,L)
+    m = mask0.unsqueeze(-1)
+    pos_per_class = (y0 * m).sum(dim=(0,1))          # somme des valeurs gaussiennes
+    max_per_class = (y0 * m).amax(dim=(0,1))         # max (devrait être proche de 1 si un event est dans la fenêtre)
+    print("sanity pos_sum (1 batch):", pos_per_class.tolist())
+    print("sanity pos_max (1 batch):", max_per_class.tolist())
+
 
 print("pos_weight:", pos_weight.tolist())
 
@@ -101,15 +118,39 @@ for batch in train_loader:
 
     optimizer.zero_grad()
 
+    import torch.nn.functional as F
+
     out = model(x)
-    logits = out["logits"]         # (B,L,17)
+    logits = out["logits"]  # (B,Lp,17)
+
+    # --- align targets/mask to logits length ---
+    B, Lp, C = logits.shape
+    L = y.shape[1]
+
+    if Lp != L:
+        y_aligned = F.interpolate(
+            y.permute(0, 2, 1),      # (B,17,L)
+            size=Lp,
+            mode="linear",
+            align_corners=False,
+        ).permute(0, 2, 1)           # (B,Lp,17)
+
+        mask_aligned = F.interpolate(
+            mask.unsqueeze(1),       # (B,1,L)
+            size=Lp,
+            mode="nearest",
+        ).squeeze(1)                 # (B,Lp)
+    else:
+        y_aligned = y
+        mask_aligned = mask
 
     loss = masked_bce_with_logits_loss(
         logits=logits,
-        targets=y,
-        mask=mask,
+        targets=y_aligned,
+        mask=mask_aligned,
         pos_weight=pos_weight,
     )
+
 
     loss.backward()
     optimizer.step()

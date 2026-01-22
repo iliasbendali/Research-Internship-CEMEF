@@ -13,8 +13,8 @@ class PatchTSTSpotter(nn.Module):
         num_hidden_layers: int = 6,
         num_attention_heads: int = 8,
         ffn_dim: int = 1024,
-        patch_length: int = 1,
-        patch_stride: int = 1,
+        patch_length: int = 16,
+        patch_stride: int = 8,
         channel_attention: bool = True,  # important si tu veux mixer les 512 dims
         pooling_over_channels: str = "mean",  # "mean" ou "max"
     ):
@@ -24,7 +24,7 @@ class PatchTSTSpotter(nn.Module):
 
         config = PatchTSTConfig(
             num_input_channels=num_input_channels,
-            context_length=1,          # placeholder, pas bloquant en pratique (tu passes des windows)
+            context_length=360,          # placeholder, pas bloquant en pratique (tu passes des windows)
             patch_length=patch_length,
             patch_stride=patch_stride,
             d_model=d_model,

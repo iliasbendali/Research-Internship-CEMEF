@@ -2,13 +2,14 @@
 from __future__ import annotations
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 
 @torch.no_grad()
 def compute_pos_weight_from_loader(
     loader,
     num_classes: int = 17,
-    max_pos_weight: float = 50.0,
+    max_pos_weight: float = 20.0,
     device: str | torch.device = "cpu",
     max_batches: int | None = None,
 ) -> torch.Tensor:
@@ -32,9 +33,11 @@ def compute_pos_weight_from_loader(
         pos_sum += (y * m).sum(dim=(0, 1)).cpu()
         neg_sum += ((1.0 - y) * m).sum(dim=(0, 1)).cpu()
 
-    eps = 1e-9
-    pos_weight = (neg_sum / (pos_sum + eps)).to(torch.float32)
-    pos_weight = torch.clamp(pos_weight, min=1.0, max=float(max_pos_weight))
+    eps = 1e-7
+    ratio = (neg_sum / (pos_sum + eps)).to(torch.float32)
+    pos_weight = torch.sqrt(ratio)
+    pos_weight = torch.clamp(pos_weight, min=1.0, max=max_pos_weight)
+
     return pos_weight.to(device)
 
 

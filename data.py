@@ -3,6 +3,7 @@ import numpy as np
 import re
 from domain import HalfEmbeddings, Half
 import json
+from typing import Union, List
 
 
 class SoccerNetDataClient:
@@ -13,7 +14,7 @@ class SoccerNetDataClient:
 
     LABEL_FILES = ["Labels-v3.json", "Labels-v3"]  # windows peut masquer .json
 
-    def __init__(self, root_dir: str | Path):
+    def __init__(self, root_dir: Union[str, Path]):
         self.root_dir = Path(root_dir)
         if not self.root_dir.exists():
             raise FileNotFoundError(self.root_dir)
@@ -112,7 +113,7 @@ class SoccerNetDataClient:
             metadata={"path": str(file)},
         )
     
-    def load_match(self, match_id: str) -> list[HalfEmbeddings]:
+    def load_match(self, match_id: str) -> List[HalfEmbeddings]:
         """
         Charge les embeddings des deux mi-temps d'un match.
         """
