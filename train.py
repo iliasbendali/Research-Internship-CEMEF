@@ -12,9 +12,12 @@ from losses import (
 # CONFIG
 # ------------------
 ROOT_DIR = "C:/Users/Ilias/Documents/cours_MINES/TR/projet/data/data"
-BATCH_SIZE = 4             # Zenbook safe
-NUM_WORKERS = 2            # CPU loading
+BATCH_SIZE = 2          
+NUM_WORKERS = 0            # CPU loading
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print("DEVICE:", DEVICE)
+if DEVICE == "cuda":
+    print("GPU:", torch.cuda.get_device_name(0))
 
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
