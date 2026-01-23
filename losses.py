@@ -71,3 +71,41 @@ def masked_bce_with_logits_loss(
     denom = torch.clamp(denom, min=1.0)
 
     return loss_el.sum() / denom
+
+import torch
+import torch.nn.functional as F
+
+def masked_asymmetric_focal_loss_with_logits(
+    logits: torch.Tensor,     # (B,L,C)
+    targets: torch.Tensor,    # (B,L,C) in [0,1]
+    mask: torch.Tensor = None,# (B,L) in {0,1}
+    gamma_pos: float = 2.0,
+    gamma_neg: float = 4.0,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Asymmetric focal loss (multi-label) sur logits.
+    - pousse plus fort sur les faux positifs via gamma_neg
+    - garde du signal sur les positives via gamma_pos
+    """
+    prob = torch.sigmoid(logits)
+    pt_pos = prob
+    pt_neg = 1.0 - prob
+
+    # BCE élémentaire
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+    # facteur focal asymétrique
+    w_pos = (1.0 - pt_pos).clamp(min=0.0) ** gamma_pos
+    w_neg = (1.0 - pt_neg).clamp(min=0.0) ** gamma_neg
+    focal_w = targets * w_pos + (1.0 - targets) * w_neg
+
+    loss_el = focal_w * bce  # (B,L,C)
+
+    if mask is None:
+        return loss_el.mean()
+
+    m = mask.unsqueeze(-1).to(loss_el.dtype)
+    loss_el = loss_el * m
+    denom = torch.clamp(m.sum() * logits.shape[-1], min=1.0)
+    return loss_el.sum() / denom

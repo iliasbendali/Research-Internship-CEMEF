@@ -88,9 +88,20 @@ class SoccerNetWindowDataset(Dataset):
         X_full = np.asarray(half_emb.embeddings, dtype=np.float32)  # (T,512)
         step = float(getattr(half_emb, "step_seconds", self.default_step_seconds) or self.default_step_seconds)
 
-        # 2) Labels JSON -> annotations -> Y_full
-        match_json = self.client.load_labels(match_id)
-        annotations = extract_annotations_from_match_json(match_json, half=int(half))
+        # 2) Labels JSON -> annotations -> Y_full (robuste)
+        try:
+            match_json = self.client.load_labels(match_id)
+            annotations = extract_annotations_from_match_json(match_json, half=int(half))
+        except Exception as e:
+            # JSON invalide / tronqué / etc -> on skip ce match pour les labels
+            # (on garde les embeddings, mais Y_full = 0)
+            if not hasattr(self, "_bad_labels"):
+                self._bad_labels = set()
+            if match_id not in self._bad_labels:
+                print(f"[WARN] labels invalid for match_id={match_id}: {e}")
+                self._bad_labels.add(match_id)
+            annotations = []
+
         Y_full = build_targets_for_half(
             T=int(X_full.shape[0]),
             annotations=annotations,
@@ -101,6 +112,7 @@ class SoccerNetWindowDataset(Dataset):
 
         self.cache.put(key, (X_full, Y_full, step))
         return X_full, Y_full, step
+
 
     def _build_index(self) -> None:
         # Crée toutes les fenêtres sliding pour chaque mi-temps

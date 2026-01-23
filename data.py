@@ -3,6 +3,7 @@ import numpy as np
 import re
 from domain import HalfEmbeddings, Half
 import json
+from json import JSONDecodeError
 from typing import Union, List
 
 
@@ -123,9 +124,6 @@ class SoccerNetDataClient:
         ]
 
     def load_labels(self, match_id: str) -> dict:
-        """
-        Charge le JSON de labels du match (Labels-v3).
-        """
         match_dir = self.root_dir / match_id
 
         label_path = None
@@ -138,5 +136,9 @@ class SoccerNetDataClient:
         if label_path is None:
             raise FileNotFoundError(f"Labels introuvables dans {match_dir} (attendu: {self.LABEL_FILES})")
 
-        with open(label_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(label_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except JSONDecodeError as e:
+            # ⚠️ JSON invalide -> on signale et on remonte une exception claire
+            raise ValueError(f"Labels JSON invalide: {label_path} | {e}")
