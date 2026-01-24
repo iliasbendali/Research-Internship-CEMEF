@@ -62,9 +62,9 @@ for competition_dir in ROOT_DIR.iterdir():
 print(f"matches total scanned: {glo} | with labels: {len(match_ids)} | without labels: {no_labels} | ratio_without={no_labels/max(glo,1):.3f}")
 
 # ✅ pour debug rapide, limite le nombre de matchs
-all_matches = match_ids[:100]
+random.shuffle(match_ids)
+all_matches = match_ids
 
-random.shuffle(all_matches)
 n = len(all_matches)
 train_ids = all_matches[:int(0.8 * n)]
 val_ids   = all_matches[int(0.8 * n):int(0.9 * n)]
@@ -100,6 +100,37 @@ train_loader = DataLoader(
     num_workers=NUM_WORKERS,
     pin_memory=PIN_MEMORY,
 )
+
+def quick_target_sanity(loader, n=50):
+    pos_sum = torch.zeros(17)
+    maxv = torch.zeros(17)
+    pos_ratio = torch.zeros(17)
+    tot = 0
+
+    for i, batch in enumerate(loader):
+        y = batch["y"].float()          # (B,L,17)
+        m = batch["mask"].float()       # (B,L)
+
+        # ne garde que les frames valides
+        m3 = m.unsqueeze(-1)
+        yv = y * m3
+
+        pos_sum += yv.sum(dim=(0,1))
+        maxv = torch.maximum(maxv, yv.max(dim=1).values.max(dim=0).values)
+        pos_ratio += (yv > 0.1).float().sum(dim=(0,1))  # seuil soft (gauss)
+        tot += int(m.sum().item())  # nb frames valides
+
+        if i+1 >= n:
+            break
+
+    pos_ratio = pos_ratio / max(tot, 1)
+    print("Frames valides total:", tot)
+    print("Y max par classe:", maxv.tolist())
+    print("Y sum par classe:", pos_sum.tolist())
+    print("Ratio (Y>0.1) par classe:", pos_ratio.tolist())
+
+quick_target_sanity(train_loader, n=50)
+
 
 val_loader = DataLoader(
     val_dataset,
@@ -228,9 +259,15 @@ def eval_val_events(model, loader, threshold=0.3, y_pos_thr=0.5, tol_sec=5.0, mi
 
                 fn[c] += (len(gt_peaks) - len(matched))
 
-    precision = (tp.float() / (tp + fp).float().clamp(min=1)).mean().item()
-    recall    = (tp.float() / (tp + fn).float().clamp(min=1)).mean().item()
+    support = (tp + fn)  # nb GT events (approximé) par classe
+    active = support > 0
+    if active.any():
+        precision = (tp[active].float() / (tp[active] + fp[active]).float().clamp(min=1)).mean().item()
+        recall    = (tp[active].float() / (tp[active] + fn[active]).float().clamp(min=1)).mean().item()
+    else:
+        precision, recall = 0.0, 0.0
     f1 = float(2 * precision * recall / (precision + recall + 1e-9))
+
     return precision, recall, f1
 
 
@@ -264,9 +301,15 @@ def eval_val_proxy_multi(model, loader, thresholds=(0.1, 0.2, 0.3, 0.5), y_pos_t
             fp += (pred & (~y_pos)).sum(dim=(0,1)).cpu()
             fn += ((~pred) & y_pos).sum(dim=(0,1)).cpu()
 
-        precision = (tp.float() / (tp + fp).float().clamp(min=1)).mean().item()
-        recall    = (tp.float() / (tp + fn).float().clamp(min=1)).mean().item()
-        f1 = (2*precision*recall / (precision+recall+1e-9))
+        support = (tp + fn)  # nb GT events (approximé) par classe
+        active = support > 0
+        if active.any():
+            precision = (tp[active].float() / (tp[active] + fp[active]).float().clamp(min=1)).mean().item()
+            recall    = (tp[active].float() / (tp[active] + fn[active]).float().clamp(min=1)).mean().item()
+        else:
+            precision, recall = 0.0, 0.0
+        f1 = float(2 * precision * recall / (precision + recall + 1e-9))
+
         results[th] = (precision, recall, float(f1))
     return results
 
@@ -292,13 +335,13 @@ for epoch in range(1, EPOCHS + 1):
         y_aligned, mask_aligned = align_targets_to_logits(y, mask, logits)
 
 
-        loss = masked_asymmetric_focal_loss_with_logits(
+        loss = masked_bce_with_logits_loss(
             logits=logits,
             targets=y_aligned,
             mask=mask_aligned,
-            gamma_pos=2.0,
-            gamma_neg=4.0,
+            pos_weight=pos_weight,   # IMPORTANT
         )
+
 
 
         (loss / ACCUM_STEPS).backward()
