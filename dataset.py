@@ -15,6 +15,8 @@ from data import SoccerNetDataClient
 from domain import Half
 from labels import extract_annotations_from_match_json, build_targets_for_half
 
+from collections import Counter
+import logging
 
 @dataclass(frozen=True)
 class HalfKey:
@@ -92,13 +94,21 @@ class SoccerNetWindowDataset(Dataset):
         try:
             match_json = self.client.load_labels(match_id)
             annotations = extract_annotations_from_match_json(match_json, half=int(half))
+            if not hasattr(self, "_label_counter"):
+                self._label_counter = Counter()
+
+            for ann in annotations:
+                lab = str(ann.get("label", "")).strip()
+                if lab:
+                    self._label_counter[lab] += 1
         except Exception as e:
             # JSON invalide / tronqué / etc -> on skip ce match pour les labels
             # (on garde les embeddings, mais Y_full = 0)
             if not hasattr(self, "_bad_labels"):
                 self._bad_labels = set()
             if match_id not in self._bad_labels:
-                print(f"[WARN] labels invalid for match_id={match_id}: {e}")
+                logging.warning(...)
+
                 self._bad_labels.add(match_id)
             annotations = []
 

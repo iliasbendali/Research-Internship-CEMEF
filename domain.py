@@ -33,8 +33,8 @@ LABELS = [
     "Corner",
     "Direct free-kick",
     "Indirect free-kick",
-    "Shot on target",
-    "Shot off target",
+    "Shots on target",
+    "Shots off target",
 ]
 
 label_int = {
@@ -53,8 +53,8 @@ label_int = {
     "Corner" : 12,
     "Direct free-kick" : 13,
     "Indirect free-kick" : 14,
-    "Shot on target" : 15,
-    "Shot off target" : 16,
+    "Shots on target" : 15,
+    "Shots off target" : 16,
 }
 
 LABEL_TO_IDX = {label: i for i, label in enumerate(LABELS)}
@@ -76,8 +76,8 @@ EventLabel = Literal[
     "Corner",
     "Direct free-kick",
     "Indirect free-kick",
-    "Shot on target",
-    "Shot off target",
+    "Shots on target",
+    "Shots off target",
 ]
 
 ALL_EVENT_LABELS: Set[EventLabel] = set(LABELS)  # ou Set[str] si tu préfères, mais c'est moins safe

@@ -1,6 +1,7 @@
 # train.py
 import random
 from pathlib import Path
+import json
 
 import torch
 import torch.nn.functional as F
@@ -8,11 +9,17 @@ from torch.utils.data import DataLoader
 
 from dataset import SoccerNetWindowDataset
 from models_patchtst import PatchTSTSpotter
-from losses import compute_pos_weight_from_loader, masked_bce_with_logits_loss, masked_asymmetric_focal_loss_with_logits
+from losses import compute_pos_weight_from_loader, masked_bce_with_logits_loss, masked_asymmetric_focal_loss_with_logits, masked_focal_bce_with_logits
+
+from tqdm import tqdm
+import logging
+logging.basicConfig(level=logging.WARNING)
 
 # ------------------
 # CONFIG
 # ------------------
+CKPT_DIR = Path("/home/ibendali/checkpoints") # pour stocker les meilleures paramètres
+CKPT_DIR.mkdir(exist_ok=True)
 ROOT_DIR = Path("/home/ibendali/soccernet_data/data/")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print("DEVICE:", DEVICE)
@@ -25,8 +32,8 @@ PIN_MEMORY = (DEVICE == "cuda" and NUM_WORKERS > 0)
 
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
-EPOCHS = 8               # ✅ change ici ton nombre d'epochs
-ACCUM_STEPS = 1           # ✅ mets 2/4 si tu veux batch effectif >1
+EPOCHS = 1               
+ACCUM_STEPS = 1          
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 
@@ -69,6 +76,17 @@ n = len(all_matches)
 train_ids = all_matches[:int(0.8 * n)]
 val_ids   = all_matches[int(0.8 * n):int(0.9 * n)]
 test_ids  = all_matches[int(0.9 * n):]
+
+splits = {
+    "train": train_ids,
+    "val": val_ids,
+    "test": test_ids,
+}
+with open("splits.json", "w") as f:
+    json.dump(splits, f, indent=2)
+
+print("✅ Saved splits to splits.json")
+
 
 print(f"split: train={len(train_ids)} val={len(val_ids)} test={len(test_ids)}")
 
@@ -128,6 +146,9 @@ def quick_target_sanity(loader, n=50):
     print("Y max par classe:", maxv.tolist())
     print("Y sum par classe:", pos_sum.tolist())
     print("Ratio (Y>0.1) par classe:", pos_ratio.tolist())
+    if hasattr(train_dataset, "_label_counter"):
+        print("Top raw labels:", train_dataset._label_counter.most_common(30))
+
 
 quick_target_sanity(train_loader, n=50)
 
@@ -166,19 +187,32 @@ print("pos_weight:", pos_weight.tolist())
 # ------------------
 # HELPERS
 # ------------------
+
+
 def align_targets_to_logits(y, mask, logits):
-    """Downsample y/mask de (B,L,*) vers (B,Lp,*) pour matcher logits."""
     B, Lp, C = logits.shape
     L = y.shape[1]
+
     if Lp == L:
         return y, mask
-    y_aligned = F.interpolate(
-        y.permute(0, 2, 1), size=Lp, mode="linear", align_corners=False
+
+    # downsample mask
+    m = F.adaptive_max_pool1d(mask.unsqueeze(1), output_size=Lp).squeeze(1)
+
+    # moyenne temporelle (PAS max)
+    y_mean = F.adaptive_avg_pool1d(
+        y.permute(0, 2, 1),
+        output_size=Lp
     ).permute(0, 2, 1)
-    mask_aligned = F.interpolate(
-        mask.unsqueeze(1), size=Lp, mode="nearest"
-    ).squeeze(1)
-    return y_aligned, mask_aligned
+
+    # garde uniquement la classe dominante par token
+    max_vals, max_idx = y_mean.max(dim=-1, keepdim=True)
+    y_hard = torch.zeros_like(y_mean)
+    y_hard.scatter_(-1, max_idx, max_vals)
+
+    return y_hard, m
+
+
 
 def pick_peaks_1d(probs_1d: torch.Tensor, threshold: float, min_sep: int):
     """
@@ -200,7 +234,7 @@ def pick_peaks_1d(probs_1d: torch.Tensor, threshold: float, min_sep: int):
     return kept
 
 @torch.no_grad()
-def eval_val_events(model, loader, threshold=0.3, y_pos_thr=0.5, tol_sec=5.0, min_sep_sec=10.0):
+def eval_val_events(model, loader, threshold=0.1, y_pos_thr=0.5, tol_sec=3.0, min_sep_sec=15.0):
     """
     Évaluation événementielle simple:
     - GT events: indices où y_aligned >= y_pos_thr, puis pics par NMS aussi
@@ -317,6 +351,7 @@ def eval_val_proxy_multi(model, loader, thresholds=(0.1, 0.2, 0.3, 0.5), y_pos_t
 # ------------------
 # TRAIN + VAL LOOP
 # ------------------
+best_val_f1 = -1.0
 for epoch in range(1, EPOCHS + 1):
     model.train()
     optimizer.zero_grad()
@@ -324,7 +359,8 @@ for epoch in range(1, EPOCHS + 1):
     total_loss = 0.0
     steps = 0
 
-    for step, batch in enumerate(train_loader):
+    for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}", leave=False)):
+
         x = batch["x"].to(DEVICE)
         y = batch["y"].to(DEVICE)
         mask = batch["mask"].to(DEVICE)
@@ -335,12 +371,14 @@ for epoch in range(1, EPOCHS + 1):
         y_aligned, mask_aligned = align_targets_to_logits(y, mask, logits)
 
 
-        loss = masked_bce_with_logits_loss(
-            logits=logits,
-            targets=y_aligned,
-            mask=mask_aligned,
-            pos_weight=pos_weight,   # IMPORTANT
+        loss = masked_focal_bce_with_logits(
+        logits=logits,
+        targets=y_aligned,
+        mask=mask_aligned,
+        pos_weight=pos_weight,
+        gamma=2.0,
         )
+
 
 
 
@@ -361,7 +399,43 @@ for epoch in range(1, EPOCHS + 1):
     train_loss = total_loss / max(steps, 1)
 
     # ✅ validation proxy
-    val_p, val_r, val_f1 = eval_val_events(model, val_loader, threshold=0.3, y_pos_thr=0.5, tol_sec=5.0, min_sep_sec=10.0)
-    print(f"[epoch {epoch:03d}] train_loss={train_loss:.4f} | val_event_P={val_p:.4f} val_event_R={val_r:.4f} val_event_F1={val_f1:.4f}")
+    ths = [0.1, 0.6, 0.3]
+    best = (-1, None, None, None)  # (f1, p, r, th)
+
+    for th in ths:
+        p, r, f1 = eval_val_events(
+            model, val_loader,
+            threshold=th,
+            y_pos_thr=0.5,
+            tol_sec=5.0,
+            min_sep_sec=15.0
+        )
+        if f1 > best[0]:
+            best = (f1, p, r, th)
+
+    print(f"[epoch {epoch:03d}] train_loss={train_loss:.4f} | BEST val_event: F1={best[0]:.4f} P={best[1]:.4f} R={best[2]:.4f} @th={best[3]}")
+    # sauvegarde du dernier modèle dans le dossier checkpoints
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "val_f1": best[0],   
+        },
+        CKPT_DIR / "last.pt"
+    )
+
+    if best[0] > best_val_f1:
+        best_val_f1 = best[0]
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "val_f1": best_val_f1,
+            },
+            CKPT_DIR / "best_f1.pt"
+        )
+        print(f"✅ New best model saved (F1={best_val_f1:.4f})")
 
 

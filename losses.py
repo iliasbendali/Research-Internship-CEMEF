@@ -109,3 +109,49 @@ def masked_asymmetric_focal_loss_with_logits(
     loss_el = loss_el * m
     denom = torch.clamp(m.sum() * logits.shape[-1], min=1.0)
     return loss_el.sum() / denom
+
+
+import torch
+import torch.nn.functional as F
+
+def masked_focal_bce_with_logits(
+    logits: torch.Tensor,          # (B,L,C)
+    targets: torch.Tensor,         # (B,L,C) in [0,1]
+    mask: torch.Tensor,            # (B,L)
+    pos_weight: torch.Tensor | None = None,  # (C,)
+    gamma: float = 2.0,
+    reduction: str = "mean",
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Focal loss binaire stable:
+      FL = (1 - pt)^gamma * BCE_with_logits
+    avec mask temporel + pos_weight par classe.
+
+    targets peut être soft (gauss), c'est OK.
+    """
+    B, L, C = logits.shape
+    mask3 = mask.unsqueeze(-1).float()  # (B,L,1)
+
+    # BCE par élément (B,L,C)
+    bce = F.binary_cross_entropy_with_logits(
+        logits, targets,
+        reduction="none",
+        pos_weight=pos_weight
+    )
+
+    # pt = probabilité du label correct
+    probs = torch.sigmoid(logits)
+    pt = probs * targets + (1.0 - probs) * (1.0 - targets)  # (B,L,C)
+    focal = (1.0 - pt).clamp(min=0.0, max=1.0).pow(gamma)
+
+    loss = focal * bce
+    loss = loss * mask3
+
+    if reduction == "mean":
+        denom = mask3.sum() * C
+        return loss.sum() / (denom.clamp_min(eps))
+    elif reduction == "sum":
+        return loss.sum()
+    else:
+        return loss

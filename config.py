@@ -29,26 +29,26 @@ label_int = {
     "Corner" : 12,
     "Direct free-kick" : 13,
     "Indirect free-kick" : 14,
-    "Shot on target" : 15,
-    "Shot off target" : 16,
+    "Shots on target" : 15,
+    "Shots off target" : 16,
 }
 
 sigma_by_idx = [
-    3.0,  # 0 Goal
-    4.0,  # 1 Kick-off
-    2.5,  # 2 Penalty
-    2.0,  # 3 Yellow card
-    2.0,  # 4 Red card
-    2.0,  # 5 Yellow->red card
-    3.0,  # 6 Foul
-    3.0,  # 7 Substitution
-    2.0,  # 8 Offside
-    4.0,  # 9 Ball out of play
-    3.0,  # 10 Throw-in
-    3.0,  # 11 Clearance
-    3.0,  # 12 Corner
-    2.5,  # 13 Direct free-kick
-    2.5,  # 14 Indirect free-kick
-    2.0,  # 15 Shot on target
-    2.0,  # 16 Shot off target
+    0.75,  # 0 Goal
+    1.0,  # 1 Kick-off
+    0.5,  # 2 Penalty
+    0.5,  # 3 Yellow card
+    0.5,  # 4 Red card
+    0.5,  # 5 Yellow->red card
+    0.75,  # 6 Foul
+    0.75,  # 7 Substitution
+    0.5,  # 8 Offside
+    1.0,  # 9 Ball out of play
+    0.75,  # 10 Throw-in
+    0.75,  # 11 Clearance
+    0.75,  # 12 Corner
+    0.7,  # 13 Direct free-kick
+    0.7,  # 14 Indirect free-kick
+    0.5,  # 15 Shot on target
+    0.5,  # 16 Shot off target
 ]
