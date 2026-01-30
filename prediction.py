@@ -4,9 +4,11 @@ import random
 import json
 import numpy as np
 import torch
+import math
 
 from data import SoccerNetDataClient
 from models_patchtst import PatchTSTSpotter
+from labels import extract_annotations_from_match_json
 
 # ====== CONFIG ======
 ROOT_DIR = Path("/home/ibendali/soccernet_data/data/")
@@ -14,16 +16,18 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ou chemin absolu si tu préfères:
 CKPT_PATH = Path("/home/ibendali/checkpoints/best_f1.pt")
-
+THR_PATH = Path("/home/ibendali/checkpoints")
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
 STEP_SECONDS_DEFAULT = 0.5  # 2Hz
 
 
-# mêmes sigmas que train (ou ceux que tu utilises en ce moment)
 sigma_by_idx = [
     3.0,4.0,2.5,2.0,2.0,2.0,3.0,3.0,2.0,4.0,3.0,3.0,3.0,2.5,2.5,2.0,2.0
 ]
+
+with open("/home/ibendali/checkpoints/thr_per_class.json", "r") as f:
+    thr_per_class = np.array(json.load(f)["thr_per_class"], dtype=np.float32)
 
 # Postprocess simple (sans dépendre de ton domain.py)
 LABELS = [
@@ -56,10 +60,7 @@ def postprocess(scores_T17, step_seconds, per_class_percentile=99.9, min_sep_sec
         pmax = float(p.max())
         if pmax < 0.05:
             continue
-
-        threshold = float(np.percentile(p, per_class_percentile))
-        # threshold = max(0.05, min(threshold, pmax * 0.9))
-        threshold = 0.5 
+        threshold = max(thr_per_class[c] + 0.03, 0.3)
         peaks = pick_peaks_1d(p, threshold=threshold, min_sep=min_sep)
         if top_k is not None and len(peaks) > top_k:
             peaks = sorted(peaks, key=lambda t: p[t], reverse=True)[:top_k]
@@ -150,11 +151,11 @@ def main():
 
     print(f"✅ Loaded checkpoint: {CKPT_PATH} | epoch={ckpt.get('epoch')} | val_f1={ckpt.get('val_f1')}")
 
-
-
     client = SoccerNetDataClient(ROOT_DIR)
+    match_json = client.load_labels(match_id)
 
     for half in [1, 2]:
+        ground_truth = extract_annotations_from_match_json(match_json, half)
         half_obj = client.load_half(match_id, half)
         X = np.asarray(half_obj.embeddings, dtype=np.float32)  # (T,512)
         step = float(getattr(half_obj, "step_seconds", STEP_SECONDS_DEFAULT) or STEP_SECONDS_DEFAULT)
@@ -179,23 +180,7 @@ def main():
         print(f"\n--- HALF {half} --- step={step}s | T={scores.shape[0]}")
         for ms, lab, sc, thr in events[:200]:
             print(f"{ms:>8d} ms | {lab:<18s} | score={sc:.3f} | thr={thr:.3f}")
-    match_json = client.load_labels(match_id)
-    print("keys:", list(match_json.keys())[:30])
-
-    for k in ["annotations", "Annotations", "labels", "Labels", "events", "Events"]:
-        v = match_json.get(k, None)
-        if isinstance(v, list):
-            print(f"Found list key '{k}' with len={len(v)}")
-            if len(v) > 0:
-                print("sample item:", v[0])
-            break
-    else:
-        # aucune liste trouvée
-        print("No obvious list of annotations found.")
-        # affiche un extrait du json pour comprendre
-        s = json.dumps(match_json)[:800]
-        print("json head:", s)
-
+        print(f"Ground truth : {ground_truth}")
 
 if __name__ == "__main__":
     main()

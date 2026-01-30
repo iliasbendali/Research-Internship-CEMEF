@@ -2,6 +2,7 @@
 import random
 from pathlib import Path
 import json
+import math
 
 import torch
 import torch.nn.functional as F
@@ -26,15 +27,15 @@ print("DEVICE:", DEVICE)
 if DEVICE == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
 
-BATCH_SIZE = 1
+BATCH_SIZE = 5
 NUM_WORKERS = 0
 PIN_MEMORY = (DEVICE == "cuda" and NUM_WORKERS > 0)
 
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
-EPOCHS = 1               
+EPOCHS = 3              
 ACCUM_STEPS = 1          
-LR = 1e-4
+LR = 2e-4
 WEIGHT_DECAY = 1e-4
 
 # sigma_by_idx
@@ -173,6 +174,23 @@ model = PatchTSTSpotter(
 ).to(DEVICE)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+# SCHEDULER (warmup + cosine)
+
+steps_per_epoch = len(train_loader) // ACCUM_STEPS
+total_updates = steps_per_epoch * EPOCHS
+
+warmup_frac = 0.05
+warmup_updates = max(1, int(total_updates * warmup_frac))
+
+def lr_lambda(update_idx: int):
+    # update_idx: 0..total_updates-1
+    if update_idx < warmup_updates:
+        return float(update_idx + 1) / float(warmup_updates)
+    # cosine decay de 1 -> 0
+    progress = float(update_idx - warmup_updates) / float(max(1, total_updates - warmup_updates))
+    return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 # ------------------
 # POS_WEIGHT (sur TRAIN uniquement)
@@ -347,6 +365,81 @@ def eval_val_proxy_multi(model, loader, thresholds=(0.1, 0.2, 0.3, 0.5), y_pos_t
         results[th] = (precision, recall, float(f1))
     return results
 
+import numpy as np
+
+@torch.no_grad()
+def calibrate_thresholds_per_class(model, loader, y_pos_thr=0.5, grid=None):
+    """
+    Retourne thr_per_class (np.array shape [17]) calibré sur la VAL.
+    Proxy frame-level: maximise F1 par classe, puis tu peux utiliser ces seuils en prediction.
+    """
+    model.eval()
+    if grid is None:
+        grid = np.linspace(0.05, 0.95, 19)  # 0.05,0.10,...0.95
+
+    all_p = []
+    all_y = []
+    all_m = []
+
+    for batch in loader:
+        x = batch["x"].to(DEVICE)
+        y = batch["y"].to(DEVICE)
+        mask = batch["mask"].to(DEVICE)
+
+        logits = model(x)["logits"]  # (B,Lp,17)
+        y_aligned, m_aligned = align_targets_to_logits(y, mask, logits)
+
+        p = torch.sigmoid(logits)                 # (B,Lp,17)
+        yb = (y_aligned >= y_pos_thr).float()     # binarise GT
+
+        all_p.append(p.detach().cpu())
+        all_y.append(yb.detach().cpu())
+        all_m.append(m_aligned.detach().cpu())
+
+    # --- masque padding (fix) ---
+    # P: (N,Lp,17), Y: (N,Lp,17), M: (N,Lp)
+    P = torch.cat(all_p, dim=0)
+    Y = torch.cat(all_y, dim=0)
+    M = torch.cat(all_m, dim=0)
+
+    P_flat = P.reshape(-1, 17)   # (N*Lp, 17)
+    Y_flat = Y.reshape(-1, 17)
+    M_flat = M.reshape(-1).bool()  # (N*Lp,)
+
+    P_flat = P_flat[M_flat]      # (Nvalid, 17)
+    Y_flat = Y_flat[M_flat]
+
+
+    thr = np.zeros(17, dtype=np.float32)
+
+    for c in range(17):
+        best_f1 = -1.0
+        best_th = 0.5
+        pc = P_flat[:, c].numpy()
+        yc = Y_flat[:, c].numpy().astype(np.bool_)
+
+        # si aucune GT positive sur la val pour la classe, seuil haut
+        if yc.sum() == 0:
+            thr[c] = 0.99
+            continue
+
+        for th in grid:
+            pred = pc >= th
+            tp = np.logical_and(pred, yc).sum()
+            fp = np.logical_and(pred, ~yc).sum()
+            fn = np.logical_and(~pred, yc).sum()
+
+            precision = tp / max(tp + fp, 1)
+            recall = tp / max(tp + fn, 1)
+            f1 = 2 * precision * recall / max(precision + recall, 1e-9)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_th = th
+
+        thr[c] = best_th
+
+    return thr
 
 # ------------------
 # TRAIN + VAL LOOP
@@ -385,7 +478,11 @@ for epoch in range(1, EPOCHS + 1):
         (loss / ACCUM_STEPS).backward()
 
         if (step + 1) % ACCUM_STEPS == 0:
+            # grad clipping (stabilise fortement)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
             optimizer.step()
+            scheduler.step()      # <-- IMPORTANT: step scheduler ici
             optimizer.zero_grad()
 
         total_loss += loss.item()
@@ -393,7 +490,9 @@ for epoch in range(1, EPOCHS + 1):
 
     # flush restant
     if steps % ACCUM_STEPS != 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        scheduler.step()
         optimizer.zero_grad()
 
     train_loss = total_loss / max(steps, 1)
@@ -412,8 +511,14 @@ for epoch in range(1, EPOCHS + 1):
         )
         if f1 > best[0]:
             best = (f1, p, r, th)
+    current_lr = optimizer.param_groups[0]["lr"]
+    print(f"[epoch {epoch:03d}] train_loss={train_loss:.4f} | BEST val_event: F1={best[0]:.4f} P={best[1]:.4f} R={best[2]:.4f} @th={best[3]} | lr={current_lr:.3f}")
+    thr_per_class = calibrate_thresholds_per_class(model, val_loader, y_pos_thr=0.5)
+    print("thr_per_class:", thr_per_class.tolist())
 
-    print(f"[epoch {epoch:03d}] train_loss={train_loss:.4f} | BEST val_event: F1={best[0]:.4f} P={best[1]:.4f} R={best[2]:.4f} @th={best[3]}")
+    with open(CKPT_DIR / "thr_per_class.json", "w") as f:
+        json.dump({"thr_per_class": thr_per_class.tolist()}, f, indent=2)
+
     # sauvegarde du dernier modèle dans le dossier checkpoints
     torch.save(
         {
