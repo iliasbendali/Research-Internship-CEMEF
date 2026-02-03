@@ -15,8 +15,8 @@ ROOT_DIR = Path("/home/ibendali/soccernet_data/data/")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ou chemin absolu si tu préfères:
-CKPT_PATH = Path("/home/ibendali/checkpoints/best_f1.pt")
-THR_PATH = Path("/home/ibendali/checkpoints")
+CKPT_PATH = Path("/home/ibendali/checkpointsbis/best_f1.pt")
+THR_PATH = Path("/home/ibendali/checkpointsbis")
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
 STEP_SECONDS_DEFAULT = 0.5  # 2Hz
@@ -26,7 +26,7 @@ sigma_by_idx = [
     3.0,4.0,2.5,2.0,2.0,2.0,3.0,3.0,2.0,4.0,3.0,3.0,3.0,2.5,2.5,2.0,2.0
 ]
 
-with open("/home/ibendali/checkpoints/thr_per_class.json", "r") as f:
+with open("/home/ibendali/checkpointsbis/thr_per_class.json", "r") as f:
     thr_per_class = np.array(json.load(f)["thr_per_class"], dtype=np.float32)
 
 # Postprocess simple (sans dépendre de ton domain.py)
@@ -60,7 +60,7 @@ def postprocess(scores_T17, step_seconds, per_class_percentile=99.9, min_sep_sec
         pmax = float(p.max())
         if pmax < 0.05:
             continue
-        threshold = max(thr_per_class[c] + 0.03, 0.3)
+        threshold = max(thr_per_class[c] + 0.015, 0.3)
         peaks = pick_peaks_1d(p, threshold=threshold, min_sep=min_sep)
         if top_k is not None and len(peaks) > top_k:
             peaks = sorted(peaks, key=lambda t: p[t], reverse=True)[:top_k]

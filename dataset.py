@@ -1,5 +1,4 @@
 # dataset.py 
-# ici on va créer les window juste pour l'entraînement
 
 from __future__ import annotations
 

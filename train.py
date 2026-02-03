@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.WARNING)
 # ------------------
 # CONFIG
 # ------------------
-CKPT_DIR = Path("/home/ibendali/checkpoints") # pour stocker les meilleures paramètres
+CKPT_DIR = Path("/home/ibendali/checkpointsbis") # pour stocker les meilleures paramètres
 CKPT_DIR.mkdir(exist_ok=True)
 ROOT_DIR = Path("/home/ibendali/soccernet_data/data/")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -27,13 +27,13 @@ print("DEVICE:", DEVICE)
 if DEVICE == "cuda":
     print("GPU:", torch.cuda.get_device_name(0))
 
-BATCH_SIZE = 5
+BATCH_SIZE = 2
 NUM_WORKERS = 0
 PIN_MEMORY = (DEVICE == "cuda" and NUM_WORKERS > 0)
 
 WINDOW_SECONDS = 180.0
 STRIDE_SECONDS = 90.0
-EPOCHS = 3              
+EPOCHS = 20              
 ACCUM_STEPS = 1          
 LR = 2e-4
 WEIGHT_DECAY = 1e-4
@@ -214,22 +214,14 @@ def align_targets_to_logits(y, mask, logits):
     if Lp == L:
         return y, mask
 
-    # downsample mask
     m = F.adaptive_max_pool1d(mask.unsqueeze(1), output_size=Lp).squeeze(1)
 
-    # moyenne temporelle (PAS max)
-    y_mean = F.adaptive_avg_pool1d(
-        y.permute(0, 2, 1),
+    y_pool = F.adaptive_max_pool1d(
+        y.permute(0, 2, 1),  # (B,17,L)
         output_size=Lp
-    ).permute(0, 2, 1)
+    ).permute(0, 2, 1)      # (B,Lp,17)
 
-    # garde uniquement la classe dominante par token
-    max_vals, max_idx = y_mean.max(dim=-1, keepdim=True)
-    y_hard = torch.zeros_like(y_mean)
-    y_hard.scatter_(-1, max_idx, max_vals)
-
-    return y_hard, m
-
+    return y_pool, m
 
 
 def pick_peaks_1d(probs_1d: torch.Tensor, threshold: float, min_sep: int):
@@ -445,14 +437,43 @@ def calibrate_thresholds_per_class(model, loader, y_pos_thr=0.5, grid=None):
 # TRAIN + VAL LOOP
 # ------------------
 best_val_f1 = -1.0
-for epoch in range(1, EPOCHS + 1):
+# --- Initialisation des données pour Article ---
+history = {
+    "train_loss": [],
+    "val_f1": [],
+    "val_precision": [],
+    "val_recall": [],
+    "epochs": []
+}
+
+start_epoch = 1
+
+# reprise entraînement
+if (CKPT_DIR / "last.pt").exists():
+    print("🔄 Reprise de l'entraînement...")
+    ckpt = torch.load(CKPT_DIR / "last.pt", map_location=DEVICE, weights_only=False)
+    
+    model.load_state_dict(ckpt["model_state"])
+    optimizer.load_state_dict(ckpt["optimizer_state"])
+    
+    # On ne charge le scheduler QUE s'il existe dans le fichier
+    if "scheduler_state" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler_state"])
+        print("✅ Scheduler restauré")
+    else:
+        print("⚠️ Scheduler non trouvé dans le checkpoint, il démarrera à l'état actuel")
+
+    history = ckpt.get("history", history)
+    start_epoch = ckpt["epoch"] + 1
+
+for epoch in range(start_epoch, EPOCHS + 1):
     model.train()
     optimizer.zero_grad()
 
     total_loss = 0.0
     steps = 0
 
-    for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}", leave=False)):
+    for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}", leave=True)):
 
         x = batch["x"].to(DEVICE)
         y = batch["y"].to(DEVICE)
@@ -519,28 +540,20 @@ for epoch in range(1, EPOCHS + 1):
     with open(CKPT_DIR / "thr_per_class.json", "w") as f:
         json.dump({"thr_per_class": thr_per_class.tolist()}, f, indent=2)
 
-    # sauvegarde du dernier modèle dans le dossier checkpoints
-    torch.save(
-        {
+    save_dict = {
             "epoch": epoch,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
-            "val_f1": best[0],   
-        },
-        CKPT_DIR / "last.pt"
-    )
-
+            "scheduler_state": scheduler.state_dict(),
+            "history": history, # Crucial pour les courbes
+            "thr_per_class": thr_per_class.tolist(), # Pour Table 3
+            "val_f1": best[0]
+        }
+        
+    torch.save(save_dict, CKPT_DIR / "last.pt")
     if best[0] > best_val_f1:
         best_val_f1 = best[0]
-        torch.save(
-            {
-                "epoch": epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "val_f1": best_val_f1,
-            },
-            CKPT_DIR / "best_f1.pt"
-        )
+        torch.save(save_dict, CKPT_DIR / "best_f1.pt")
         print(f"✅ New best model saved (F1={best_val_f1:.4f})")
 
 
